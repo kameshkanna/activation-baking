@@ -12,9 +12,6 @@ venv/
 env/
 .venv/
 
-# ── Experiment results (generated, not source) ───────────────────────────────
-results/
-
 # ── Model weights & HuggingFace cache (huge) ─────────────────────────────────
 .cache/
 huggingface/
