@@ -61,6 +61,20 @@ logger = logging.getLogger("05_baking_efficacy")
 METHODS: Tuple[str, ...] = ("none", "raw_addition", "pca_uncalibrated", "pca_k_calibrated")
 REFERENCE_LAYER_FRACTION: float = 0.6  # use layer at ~60% depth for metric
 
+ALL_BEHAVIORS: Tuple[str, ...] = (
+    "sycophancy_suppression",
+    "refusal_calibration",
+    "verbosity_control",
+    "formality",
+    "uncertainty_expression",
+)
+ALL_MODELS: Tuple[str, ...] = (
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "Qwen/Qwen2.5-7B-Instruct",
+    "google/gemma-2-9b-it",
+    "mistralai/Mistral-7B-Instruct-v0.3",
+)
+
 
 # ---------------------------------------------------------------------------
 # Data utilities
@@ -72,9 +86,13 @@ def load_behavior_data(
 ) -> Tuple[List[str], List[str]]:
     """Load positive and negative prompts for a named behavior.
 
-    Expects either a JSON file ``data/behaviors/{behavior}.json`` with
-    ``{"positive": [...], "negative": [...]}`` or two plain text files
-    ``{behavior}_positive.txt`` / ``{behavior}_negative.txt``.
+    Supported formats (checked in order):
+      1. JSONL file ``data/behaviors/{behavior}.jsonl`` — one JSON object per line
+         with ``{"positive": "...", "negative": "..."}``.
+      2. JSON file ``data/behaviors/{behavior}.json`` — top-level dict with
+         ``{"positive": [...], "negative": [...]}``.
+      3. Two plain text files ``{behavior}_positive.txt`` /
+         ``{behavior}_negative.txt``, one prompt per line.
 
     Args:
         data_dir: Root data directory.
@@ -87,22 +105,34 @@ def load_behavior_data(
         FileNotFoundError: If no matching data file is found.
         ValueError: If the positive/negative lists differ in length.
     """
+    jsonl_path = data_dir / "behaviors" / f"{behavior}.jsonl"
     json_path = data_dir / "behaviors" / f"{behavior}.json"
     pos_path = data_dir / "behaviors" / f"{behavior}_positive.txt"
     neg_path = data_dir / "behaviors" / f"{behavior}_negative.txt"
 
-    if json_path.exists():
+    if jsonl_path.exists():
+        positive: List[str] = []
+        negative: List[str] = []
+        with jsonl_path.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                positive.append(record["positive"])
+                negative.append(record["negative"])
+    elif json_path.exists():
         with json_path.open() as fh:
             payload = json.load(fh)
-        positive: List[str] = payload["positive"]
-        negative: List[str] = payload["negative"]
+        positive = payload["positive"]
+        negative = payload["negative"]
     elif pos_path.exists() and neg_path.exists():
-        positive = [l.strip() for l in pos_path.read_text().splitlines() if l.strip()]
-        negative = [l.strip() for l in neg_path.read_text().splitlines() if l.strip()]
+        positive = [ln.strip() for ln in pos_path.read_text().splitlines() if ln.strip()]
+        negative = [ln.strip() for ln in neg_path.read_text().splitlines() if ln.strip()]
     else:
         raise FileNotFoundError(
             f"No behavior data found for '{behavior}'. "
-            f"Expected {json_path} or {pos_path}/{neg_path}."
+            f"Expected {jsonl_path}, {json_path}, or {pos_path}/{neg_path}."
         )
 
     if len(positive) != len(negative):
@@ -653,21 +683,48 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Entry point for experiment 05."""
+    """Entry point for experiment 05.
+
+    Supports ``--model all`` to iterate over all four target models and
+    ``--behavior all`` to iterate over all five behavior datasets.
+    """
     args = _parse_args()
     device = torch.device(args.device)
 
-    run_efficacy_experiment(
-        model_id=args.model,
-        behavior=args.behavior,
-        device=device,
-        output_dir=args.output_dir,
-        data_dir=args.data_dir,
-        results_dir=args.results_dir,
-        alpha=args.alpha,
-        seed=args.seed,
-        train_fraction=args.train_fraction,
-    )
+    model_ids: List[str] = list(ALL_MODELS) if args.model == "all" else [args.model]
+    behaviors: List[str] = list(ALL_BEHAVIORS) if args.behavior == "all" else [args.behavior]
+
+    for model_id in model_ids:
+        for behavior in behaviors:
+            logger.info(
+                "=== Running efficacy experiment: model=%s | behavior=%s ===",
+                model_id,
+                behavior,
+            )
+            try:
+                run_efficacy_experiment(
+                    model_id=model_id,
+                    behavior=behavior,
+                    device=device,
+                    output_dir=args.output_dir,
+                    data_dir=args.data_dir,
+                    results_dir=args.results_dir,
+                    alpha=args.alpha,
+                    seed=args.seed,
+                    train_fraction=args.train_fraction,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Experiment failed for model=%s behavior=%s: %s",
+                    model_id,
+                    behavior,
+                    exc,
+                    exc_info=True,
+                )
+            finally:
+                gc.collect()
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

@@ -51,6 +51,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("06_weight_space_alignment")
 
+ALL_BEHAVIORS: Tuple[str, ...] = (
+    "sycophancy_suppression",
+    "refusal_calibration",
+    "verbosity_control",
+    "formality",
+    "uncertainty_expression",
+)
+ALL_MODELS: Tuple[str, ...] = (
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "Qwen/Qwen2.5-7B-Instruct",
+    "google/gemma-2-9b-it",
+    "mistralai/Mistral-7B-Instruct-v0.3",
+)
+
 
 # ---------------------------------------------------------------------------
 # SVD helpers
@@ -460,19 +474,46 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Entry point for experiment 06."""
+    """Entry point for experiment 06.
+
+    Supports ``--model all`` to iterate over all four target models and
+    ``--behavior all`` to iterate over all five behavior datasets.
+    """
     args = _parse_args()
     device = torch.device(args.device)
 
-    run_weight_alignment_experiment(
-        model_id=args.model,
-        behavior=args.behavior,
-        device=device,
-        output_dir=args.output_dir,
-        results_dir=args.results_dir,
-        top_k=args.top_k,
-        seed=args.seed,
-    )
+    model_ids: List[str] = list(ALL_MODELS) if args.model == "all" else [args.model]
+    behaviors: List[str] = list(ALL_BEHAVIORS) if args.behavior == "all" else [args.behavior]
+
+    for model_id in model_ids:
+        for behavior in behaviors:
+            logger.info(
+                "=== Weight-space alignment: model=%s | behavior=%s ===",
+                model_id,
+                behavior,
+            )
+            try:
+                run_weight_alignment_experiment(
+                    model_id=model_id,
+                    behavior=behavior,
+                    device=device,
+                    output_dir=args.output_dir,
+                    results_dir=args.results_dir,
+                    top_k=args.top_k,
+                    seed=args.seed,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Experiment failed for model=%s behavior=%s: %s",
+                    model_id,
+                    behavior,
+                    exc,
+                    exc_info=True,
+                )
+            finally:
+                gc.collect()
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
