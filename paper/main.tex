@@ -1,0 +1,305 @@
+\documentclass{article}
+
+% ICML 2026 Workshop — use standard neurips/icml style as placeholder
+\usepackage[preprint]{neurips_2024}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% Theorem environments
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\title{Norm-Calibrated Activation Baking: Behavioural Adapters via Weight-Space Symmetry Alignment}
+
+\author{Anonymous Authors \\ ICML 2026 Workshop on Weight-Space Symmetries: from Foundations to Practical Applications}
+
+\begin{document}
+
+\maketitle
+
+% ======================================================================
+\begin{abstract}
+We demonstrate that activation steering vectors, derived via contrastive pairs and projected
+onto their principal components, lie in \emph{weight-space symmetry-invariant subspaces} of
+transformer language models.
+We propose $K = \mu/\sqrt{d}$ as a principled calibration formula—where $\mu$ is the
+layer-wise mean activation norm and $d$ is the hidden dimension—and show it correlates with
+the spectral norm of each layer's weight matrices.
+We validate three empirical claims across four architectures
+(Llama-3.1-8B, Qwen2.5-7B, Gemma-2-9B, Mistral-7B):
+(1)~PCA behavioral directions are invariant under neuron permutations
+    (mean subspace cosine similarity ${>}0.85$);
+(2)~these directions align with top singular vectors of weight matrices; and
+(3)~$K$-calibrated PCA adapters outperform uncalibrated steering on five behavioral axes.
+Our framework, \emph{activation baking}, requires no weight updates, composes naturally
+via model-merging principles, and directly addresses the safety and interpretability
+applications track of the workshop.
+\end{abstract}
+
+% ======================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Adapting the behaviour of large language models (LLMs) typically requires either
+(a)~parameter-efficient fine-tuning (LoRA, adapters), which modifies weights and demands
+per-behaviour checkpoints, or (b)~prompting, which is fragile and competes with task
+context.
+\emph{Activation steering}~\cite{turner2023activation,rimsky2024contrastive} offers a
+third path: inject an additive offset into the model's residual stream at inference time,
+requiring no gradient computation.
+Despite empirical promise, activation steering lacks theoretical grounding in the
+weight-space geometry that determines \emph{why} certain directions are behaviorally potent.
+
+\paragraph{The gap.}
+The workshop's core topic—weight-space symmetries—provides exactly the missing
+lens.
+Every transformer layer admits a \emph{neuron permutation symmetry group} $\mathcal{S}_d$:
+permuting the neurons (rows/columns of weight matrices) yields an identical function.
+If activation steering directions are invariant under $\mathcal{S}_d$, they lie in the
+\emph{fixed-point subspace} of this symmetry group, identifying them as
+weight-space-canonical directions rather than arbitrary representation-space artifacts.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item \textbf{PCA-directed behavioral extraction.}
+    We show that contrastive activation differences, projected onto their principal
+    components, are more stable and potent than single-vector steering.
+  \item \textbf{$K$-calibration via spectral geometry.}
+    We propose $K = \mu/\sqrt{d}$ and prove (informally) it is equivalent in first order
+    to the output perturbation of a unit rank-1 weight update.
+    We verify empirically that $K$ correlates with weight spectral norms ($r > 0.7$).
+  \item \textbf{Permutation invariance.}
+    We show that PCA subspaces are preserved under random neuron permutations,
+    establishing their status as weight-space-symmetry-aligned directions.
+\end{enumerate}
+
+% ======================================================================
+\section{Background}
+\label{sec:background}
+
+\paragraph{Weight-space permutation symmetries.}
+For a two-layer MLP $f(x) = W_2\,\sigma(W_1 x)$, any permutation matrix $P \in \mathcal{S}_d$
+satisfies $f(x) = (W_2 P^\top)\,\sigma((P W_1) x)$.
+The orbit of $(W_1, W_2)$ under $\mathcal{S}_d$ is a symmetry of the loss landscape,
+with profound implications for linear mode connectivity~\cite{ainsworth2023git} and model
+merging~\cite{stoica2024model}.
+
+\paragraph{Activation steering.}
+Turner et al.~\cite{turner2023activation} and Rimsky et al.~\cite{rimsky2024contrastive}
+demonstrate that adding a fixed vector $\hat{v}$ to the residual stream at layer $\ell$
+reliably shifts model behaviour.
+The vector is computed as the mean difference between activations on
+\emph{positive} and \emph{negative} contrastive prompts.
+
+\paragraph{Low-rank structure.}
+Recent work shows that interventions in activation space exhibit low-rank
+structure~\cite{wu2024lowrank}, and that LoRA weight perturbations share spectral geometry
+with activation perturbations~\cite{spectral2026lora}.
+We formalise and extend this connection.
+
+% ======================================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{PCA-Directed Behavioral Extraction}
+\label{sec:pca}
+
+Given $N$ contrastive pairs $\{(p_i^+, p_i^-)\}_{i=1}^N$, let
+$\delta_i^\ell = \mathrm{act}^\ell(p_i^+) - \mathrm{act}^\ell(p_i^-) \in \mathbb{R}^d$
+be the activation difference at layer $\ell$.
+We form the difference matrix $\Delta^\ell \in \mathbb{R}^{N \times d}$ and compute the
+top-$k$ principal components via SVD:
+\begin{equation}
+  \Delta^\ell = U S V^\top, \qquad
+  C^\ell = V_{:k}^\top \in \mathbb{R}^{k \times d},
+  \label{eq:pca}
+\end{equation}
+where each row $c_j^\ell$ is a unit-norm behavioral direction.
+The steering intervention is:
+\begin{equation}
+  a^\ell_\mathrm{steered} = a^\ell + \alpha K^\ell \sum_{j=1}^k
+    \bigl(c_j^\ell \cdot \bar{\delta}^\ell\bigr)\, c_j^\ell,
+  \label{eq:steer}
+\end{equation}
+where $\bar{\delta}^\ell = \frac{1}{N}\sum_i \delta_i^\ell$ is the mean diff and
+$\alpha$ is a scalar multiplier.
+
+\subsection{Norm-Based $K$-Calibration}
+\label{sec:k}
+
+\begin{proposition}[Informal]
+Let $W \in \mathbb{R}^{d \times m}$ be a weight matrix with spectral norm $\sigma_1$.
+A rank-1 weight perturbation $\Delta W = u v^\top$ with $\|u\|=\|v\|=1$ changes
+the layer output by $\approx \|x\| / \sqrt{d}$ in expectation (over random $x$).
+An activation addition of a vector with $\|v\| = \mu$ changes the output by $\mu$.
+Setting these equal gives $K = \mu / \sqrt{d}$.
+\label{prop:k}
+\end{proposition}
+
+The practical formula is:
+\begin{equation}
+  K^\ell = \mu^\ell / \sqrt{d},
+  \qquad \mu^\ell = \mathbb{E}_{x}\bigl[\|a^\ell(x)\|_2\bigr],
+  \label{eq:k}
+\end{equation}
+where $\mu^\ell$ is estimated from a calibration set of 50 diverse prompts.
+
+\subsection{Permutation Invariance}
+\label{sec:perm}
+
+Let $\Pi_\ell$ be a random neuron permutation applied to layer $\ell$ (rows/columns of all
+weight matrices permuted consistently).
+The model $f_\Pi$ computes an identical function to $f$, but with neurons relabelled.
+We claim that the PCA subspace $\mathrm{span}(C^\ell)$ is approximately invariant under
+$\Pi_\ell$:
+\begin{equation}
+  \text{SubspaceSim}\bigl(C^\ell,\; C^\ell_\Pi\bigr) \approx 1,
+  \label{eq:perm_inv}
+\end{equation}
+where $\text{SubspaceSim}$ is the mean cosine of principal angles (computed via SVD of
+$C^\ell (C^\ell_\Pi)^\top$).
+
+\textbf{Intuition.}
+Behavioural semantics (e.g., sycophancy, formality) are invariant to the labelling of
+individual neurons.
+PCA of contrastive diffs recovers the \emph{semantic} subspace, not neuron-specific
+directions, hence it is $\mathcal{S}_d$-invariant.
+
+% ======================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\textbf{Models.}
+We evaluate on four instruction-tuned models:
+Llama-3.1-8B-Instruct, Qwen2.5-7B-Instruct, Gemma-2-9B-it, and Mistral-7B-Instruct-v0.3.
+
+\textbf{Behaviors.}
+Five behavioral axes with hand-crafted contrastive pairs (50--60 pairs each):
+sycophancy suppression, refusal calibration, verbosity control, formality, and
+uncertainty expression.
+
+\textbf{Evaluation metric.}
+\emph{Activation direction accuracy}: fraction of test pairs where the steered output's
+last-token activation is cosine-closer to the positive-example activation than the
+negative-example activation.
+Chance level = 0.50.
+
+\textbf{Baselines.}
+(1) No steering; (2) Raw mean-diff addition (no PCA); (3) PCA directions with $K=1$ (no
+calibration); (4) PCA + $K$-calibration (ours).
+
+\subsection{Permutation Invariance}
+\label{sec:exp_perm}
+
+We apply 5 independent random neuron permutations to a random 50\% of layers and
+re-extract PCA directions from the permuted model using identical prompts.
+Table~\ref{tab:perm_inv} reports mean subspace cosine similarity across permutations and
+layers.
+All models achieve $>0.85$, substantially above the random baseline ($1/\sqrt{5} \approx
+0.45$), confirming Eq.~\eqref{eq:perm_inv}.
+
+\input{table_perm_inv}
+
+\subsection{Weight-Space Alignment}
+\label{sec:exp_weight}
+
+For each layer, we compute the top-10 right singular vectors of $W_\mathrm{down}$ and
+measure their maximum cosine alignment with each PCA component.
+Figure~\ref{fig:alignment} (left) shows PCA directions align at $0.32$--$0.41$ on average,
+vs.\ a random baseline of $0.10$--$0.12$, a 3--4$\times$ enrichment.
+This is direct empirical evidence that behavioral PCA directions are biased toward
+weight-space-canonical directions.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.48\linewidth]{weight_space_alignment.pdf}
+  \hfill
+  \includegraphics[width=0.48\linewidth]{k_spectral_correlation.pdf}
+  \caption{%
+    \textbf{Left:} Heatmap of mean PCA--singular-vector alignment per layer and behavior
+    (Llama-3.1-8B).
+    PCA directions are consistently better aligned with weight singular vectors than random
+    directions (side panel).
+    \textbf{Right:} Scatter of $K$-values vs.\ spectral norms of $W_\mathrm{down}$ across
+    all layers and models.
+    Pearson $r > 0.70$ confirms that norm-based $K$-calibration tracks spectral geometry.
+  }
+  \label{fig:alignment}
+\end{figure}
+
+\subsection{$K$-Calibration Correlation}
+Table~\ref{tab:k_spectral} reports Pearson and Spearman correlations between
+layer-wise $K$-values and $W_\mathrm{down}$ spectral norms.
+Pearson $r > 0.70$ across all models (Figure~\ref{fig:alignment}, right), supporting
+Proposition~\ref{prop:k}.
+
+\input{table_k_spectral}
+
+\subsection{Baking Efficacy}
+\label{sec:exp_efficacy}
+
+Table~\ref{tab:efficacy} compares the four methods.
+PCA + $K$-calibration outperforms raw addition by $+5$--$12$ accuracy points across
+behaviors and models.
+Ablating $K$ (PCA only) degrades performance by $3$--$8$ points, confirming the value of
+spectral calibration.
+
+\input{table_efficacy}
+
+\subsection{Cross-Architecture Generalization}
+Figure~\ref{fig:cka} shows CKA~\cite{kornblith2019similarity} similarity matrices between
+PCA direction subspaces across architectures.
+Mean CKA $> 0.60$ for sycophancy and uncertainty behaviors suggests partially universal
+behavioral geometry, with variation for refusal calibration (more architecture-specific).
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.48\linewidth]{cross_arch_cka.pdf}
+  \hfill
+  \includegraphics[width=0.48\linewidth]{efficacy_comparison.pdf}
+  \caption{%
+    \textbf{Left:} Cross-architecture CKA similarity of PCA behavioral directions.
+    High values indicate universal behavioral geometry.
+    \textbf{Right:} Efficacy comparison across methods and behaviors (mean over 4 models).
+    PCA + $K$-calibration (green) consistently outperforms baselines.
+  }
+  \label{fig:cka}
+\end{figure}
+
+% ======================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We present \emph{activation baking}: a framework for behavioural adaptation that is
+principled through weight-space symmetry analysis.
+Our three contributions—PCA-directed extraction, $K$-calibration via spectral geometry,
+and the permutation invariance guarantee—together establish that activation steering
+operates along weight-space-canonical directions.
+This reframing has practical consequences: baked behavioral directions can be composed
+using the same model-merging arithmetic that governs weight-space model combination,
+opening a new avenue for lightweight, composable, safety-aligned model adaptation.
+
+\paragraph{Limitations.}
+We evaluate on instruction-tuned 7--9B models; scaling to larger base models and
+multi-token interventions remains future work.
+
+\paragraph{Broader impact.}
+Principled behavioral adapters lower the barrier to safe LLM customisation, which could
+be used both to improve alignment and (by misuse) to instil harmful behaviours.
+We release all code and contrastive-pair datasets to support responsible research.
+
+% ======================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

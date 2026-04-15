@@ -1,0 +1,61 @@
+seed: 42
+default_device: "cuda"
+default_output_dir: "results"
+
+norm_profiling:
+  n_prompts: 50
+  max_new_tokens: 1
+  batch_size: 4
+  position: "last"          # extract last-token activation
+  output_subdir: "norm_profiles"
+
+contrastive_extraction:
+  n_components: 5           # PCA components to retain
+  batch_size: 4
+  position: "last"
+  output_subdir: "pca_directions"
+  behaviors:
+    - sycophancy_suppression
+    - refusal_calibration
+    - verbosity_control
+    - formality
+    - uncertainty_expression
+
+k_calibration:
+  k_formula: "mu_over_sqrt_hidden"   # K = mean_norm / sqrt(hidden_size)
+  output_subdir: "k_calibration"
+  spectral_sample_layers: "all"      # compute spectral norms on all layers
+
+permutation_invariance:
+  n_permutations: 5                  # random seeds for permutation
+  permuted_layers: "random_half"     # permute ~50% of layers
+  output_subdir: "permutation_invariance"
+  metric: "cosine_similarity"        # between PCA dirs pre/post permutation
+
+baking_efficacy:
+  train_split: 0.8
+  alpha_values: [0.5, 1.0, 1.5, 2.0]
+  baselines:
+    - none
+    - raw_addition              # mean diff vector (no PCA)
+    - pca_uncalibrated          # PCA dirs, alpha=1 (no K formula)
+    - pca_k_calibrated          # full method
+  output_subdir: "efficacy"
+  n_test_pairs: 50
+
+weight_space_alignment:
+  top_k_singular: 10          # compare top-10 SVD dirs vs PCA dirs
+  layers: "all"
+  output_subdir: "weight_alignment"
+  weight_keys:
+    - "mlp.down_proj"
+    - "mlp.up_proj"
+    - "self_attn.o_proj"
+
+cross_arch:
+  similarity_metric: "cka"    # centered kernel alignment
+  n_components: 5
+  output_subdir: "cross_arch"
+  behaviors:
+    - sycophancy_suppression
+    - uncertainty_expression

@@ -1,0 +1,59 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+
+# ── Experiment results (generated, not source) ───────────────────────────────
+results/
+
+# ── Model weights & HuggingFace cache (huge) ─────────────────────────────────
+.cache/
+huggingface/
+models/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# ── Serialised steering artefacts ────────────────────────────────────────────
+*.pkl
+*.pickle
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+.env
+.env.local
+*.tmp
+*.temp
+.pytest_cache/
+.coverage
+*.tar.gz
+
+# ── Claude Code internal ──────────────────────────────────────────────────────
+.claude/

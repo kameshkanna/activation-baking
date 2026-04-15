@@ -1,0 +1,56 @@
+models:
+  llama:
+    name: "Llama-3.1-8B-Instruct"
+    huggingface_id: "meta-llama/Llama-3.1-8B-Instruct"
+    architecture: "llama"
+    num_layers: 32
+    hidden_size: 4096
+    num_heads: 32
+    intermediate_size: 14336
+    is_instruct: true
+    mlp_down_proj_key: "mlp.down_proj"
+    residual_key_pattern: "model.layers.{i}"
+    transformers_min_version: "4.40.0"
+    requires_license: true
+
+  qwen:
+    name: "Qwen2.5-7B-Instruct"
+    huggingface_id: "Qwen/Qwen2.5-7B-Instruct"
+    architecture: "qwen2"
+    num_layers: 28
+    hidden_size: 3584
+    num_heads: 28
+    intermediate_size: 18944
+    is_instruct: true
+    mlp_down_proj_key: "mlp.down_proj"
+    residual_key_pattern: "model.layers.{i}"
+    transformers_min_version: "4.37.0"
+    requires_license: false
+
+  gemma:
+    name: "Gemma-2-9B-it"
+    huggingface_id: "google/gemma-2-9b-it"
+    architecture: "gemma2"
+    num_layers: 42
+    hidden_size: 3584
+    num_heads: 16
+    intermediate_size: 14336
+    is_instruct: true
+    mlp_down_proj_key: "mlp.down_proj"
+    residual_key_pattern: "model.layers.{i}"
+    transformers_min_version: "4.42.0"
+    requires_license: false
+
+  mistral:
+    name: "Mistral-7B-Instruct-v0.3"
+    huggingface_id: "mistralai/Mistral-7B-Instruct-v0.3"
+    architecture: "mistral"
+    num_layers: 32
+    hidden_size: 4096
+    num_heads: 32
+    intermediate_size: 14336
+    is_instruct: true
+    mlp_down_proj_key: "mlp.down_proj"
+    residual_key_pattern: "model.layers.{i}"
+    transformers_min_version: "4.36.0"
+    requires_license: false
