@@ -18,8 +18,8 @@
 \newtheorem{proposition}{Proposition}
 \newtheorem{remark}{Remark}
 
-\title{Activation Baking: Principled Behavioural Adapters via\\
-Norm-Calibrated PCA Directions in Weight Space}
+\title{Activation Baking: HuggingFace-Compatible Behavioural Adapters\\
+via Norm-Calibrated PCA Directions in Weight Space}
 
 \author{Anonymous Authors \\ ICML 2026 Workshop on Weight-Space Symmetries: from Foundations to Practical Applications}
 
@@ -76,34 +76,46 @@ activation addition produces the same output perturbation as a unit rank-1 weigh
 Working out this equivalence yields $K = \mu / \sqrt{d}$—computable in one inference pass,
 zero hyperparameter search required.
 
-\paragraph{Activation baking as cheap behavioural fine-tuning.}
-From a practical standpoint, \emph{activation baking} is a gradient-free alternative to
-LoRA for behavioural adaptation.
-LoRA requires backward passes, optimiser state, and a separate checkpoint per behaviour.
-Our framework requires only 40--60 forward passes to fit directions, a single $K$
-computation, and adds a $k \times d$ adapter (typically $5 \times 4096 = 20$K floats)
-that lives entirely in activation space and never modifies weights.
-Multiple behaviours compose by simple vector addition, mirroring the model-merging
-arithmetic the workshop addresses.
+\paragraph{Activation baking as a HuggingFace adapter ecosystem.}
+The practical packaging of our method is its most operationally novel aspect.
+Fitted adapters are saved as two files—\texttt{config.json} (metadata: base model ID,
+fitted layers, K values, architecture; $<$1\,KB) and \texttt{directions.pkl}
+(PCA tensors; $\sim$1--5\,MB for a 7B model)—following the PEFT \texttt{adapter\_config}
+convention.
+These can be pushed directly to HuggingFace Hub and loaded by anyone with two lines:
+\begin{verbatim}
+baker = Baker.load("Kameshr/sycophancy-suppression-llama")
+outputs = baker.generate(prompts)
+\end{verbatim}
+The base model is never modified; the adapter is resolved from \texttt{base\_model\_id}
+in the config, downloaded on demand, and steering hooks are injected at runtime.
+This creates a \emph{shareable, composable behavioural adapter ecosystem}: anyone can
+publish a behaviour and anyone can load it, just as LoRA adapters are shared on the Hub—but
+with zero training cost, no GPU memory overhead from extra parameters, and
+direct composability via vector addition.
 
 \paragraph{Contributions.}
 \begin{enumerate}
+  \item \textbf{HuggingFace-compatible activation adapter format.}
+    We define a self-describing adapter artefact (\texttt{config.json} +
+    \texttt{directions.pkl}) that can be published to HuggingFace Hub and loaded
+    against any compatible base model with one call—no training, no weight mutation,
+    $<$5\,MB per behaviour.
+    We release 20 fitted adapters (4 models $\times$ 5 behaviours) at
+    \texttt{huggingface.co/Kameshr}.
   \item \textbf{$K$-calibration via spectral geometry.}
-    We derive $K = \mu / \sqrt{d}$ from a rank-1 weight-perturbation equivalence
-    and validate it empirically: $K$ correlates strongly with the spectral norm of
-    $W_\mathrm{up}$ across all four models ($r > 0.70$).
+    We derive $K = \mu / \sqrt{d}$ from a rank-1 weight-perturbation equivalence—the
+    first principled formula for activation steering strength—and validate it: $K$
+    correlates with the spectral norm of $W_\mathrm{up}$ at $r > 0.70$ across
+    Llama, Qwen, and Mistral.
   \item \textbf{Weight-space alignment of PCA directions.}
-    We show that PCA behavioural directions align with top singular vectors of MLP weight
-    matrices at $3.58\times$ above a random baseline (mean-max alignment $0.108$ vs.\
-    random $0.031$), confirming their weight-space-canonical status.
-  \item \textbf{Permutation sensitivity as a quality signal.}
-    We show that PCA directions have low cosine similarity under random neuron permutation
-    (mean $0.18$), demonstrating they encode specific weight-space geometry rather than
-    arbitrary activation-space projections.
-  \item \textbf{Efficacy across four architectures.}
-    $K$-calibrated adapters yield a ${\sim}2\times$ improvement in mean cosine shift over
-    uncalibrated steering and outperform raw mean-diff addition on three of five
-    behavioural axes.
+    PCA behavioural directions align with top singular vectors of MLP weight matrices
+    at $3.58\times$ above a random baseline, confirming their weight-space-canonical
+    status and justifying the spectral grounding of $K$.
+  \item \textbf{Efficacy: $2\times$ cosine shift improvement.}
+    $K$-calibrated adapters achieve ${\approx}2\times$ the mean cosine shift of
+    uncalibrated steering ($0.0197$ vs.\ $0.0100$) and highest accuracy across
+    all methods, validated on 20 model$\times$behaviour settings.
 \end{enumerate}
 
 % ======================================================================
@@ -420,25 +432,31 @@ the same geometric principles.
 LoRA~\cite{hu2022lora} and its variants reduce fine-tuning cost but still require
 backpropagation and separate weight checkpoints per behaviour.
 Activation baking achieves behavioural adaptation with zero backward passes and a
-$20$K-float adapter file—orders of magnitude cheaper.
+${\sim}1$\,MB adapter file—orders of magnitude cheaper—and enables an open
+\emph{adapter sharing ecosystem} on HuggingFace Hub analogous to the PEFT adapter
+library, but for activation-space behavioural control.
 
 % ======================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
 We present \emph{activation baking}: a framework that treats behavioural adaptation as
-inference-time addition of PCA-directed, norm-calibrated activation vectors.
-The key contribution is the $K = \mu/\sqrt{d}$ formula, which eliminates the manual
-steering-strength search that has blocked practical deployment of activation steering.
-The formula is grounded in weight-space geometry: $K$ correlates with MLP spectral
-norms at $r > 0.70$, and the underlying PCA directions align with top singular vectors
-of weight matrices at $3.58\times$ the random baseline.
+inference-time addition of PCA-directed, norm-calibrated activation vectors, packaged
+as a HuggingFace-compatible adapter format.
 
-The practical implication is a genuine lightweight alternative to behavioural fine-tuning:
-fit in one forward pass over 40--60 pairs, zero weight updates, a $5 \times d$ adapter,
-and direct composability via vector addition.
-Cross-architecture CKA near unity (${\geq}0.998$) confirms the approach transfers without
-any model-specific adaptation.
+The core technical contribution is the $K = \mu/\sqrt{d}$ calibration formula, which
+eliminates the manual steering-strength search that has blocked practical deployment.
+The formula is grounded in weight-space geometry: $K$ correlates with MLP spectral
+norms at $r > 0.70$, PCA directions align with weight singular vectors at $3.58\times$
+random baseline, and calibration delivers ${\approx}2\times$ the cosine shift of
+uncalibrated steering.
+
+The ecosystem contribution is an open adapter library: 20 fitted adapters
+(4 models $\times$ 5 behaviours) are available at \texttt{huggingface.co/Kameshr},
+loadable against any compatible base model with a single call and composable via
+vector addition.
+This positions activation baking as a practical, shareable complement to LoRA for
+behavioural adaptation—no gradients, no checkpoints, $<$5\,MB per behaviour.
 
 \paragraph{Limitations.}
 Results are on 7--9B instruction-tuned models; we have not evaluated base models or

@@ -685,28 +685,54 @@ class Baker:
     # Serialisation
     # ------------------------------------------------------------------
 
-    def save(self, path: str) -> None:
+    def save(
+        self,
+        path: str,
+        push_to_hub: bool = False,
+        repo_id: Optional[str] = None,
+        private: bool = False,
+    ) -> None:
         """
-        Save steering artefacts to disk.
+        Save steering artefacts to disk, and optionally push to HuggingFace Hub.
 
-        Persisted state:
+        Persisted artefacts
+        -------------------
+        * ``config.json``     — HF-compatible adapter config: ``adapter_type``,
+          ``base_model_id``, ``fitted_layers``, ``k_values``, and architecture metadata.
+          Follows the same structural convention as PEFT adapter configs so that
+          adapters are self-describing and discoverable on the Hub.
         * ``directions.pkl``  — fitted :class:`BehavioralDirections` per layer.
-        * ``config.json``     — model_id, fitted_layers, k_values, and metadata.
+          Contains the PCA component tensors and per-layer K values.
 
-        Model weights are **not** saved.
+        Model weights are **not** saved — the adapter is a lightweight side-file
+        (~1--5 MB) that references the base model by HuggingFace model ID.
 
         Parameters
         ----------
         path:
-            Directory path.  Created automatically if it does not exist.
+            Local directory path.  Created automatically if it does not exist.
+        push_to_hub:
+            If ``True``, upload the saved artefacts to HuggingFace Hub using
+            ``huggingface_hub``.  Requires ``HF_TOKEN`` to be set or a prior
+            ``huggingface-cli login``.
+        repo_id:
+            HuggingFace Hub repository ID (e.g. ``"Kameshr/sycophancy-llama"``).
+            Required when ``push_to_hub=True``.
+        private:
+            If ``True``, create the Hub repo as private.
 
         Raises
         ------
         RuntimeError
             If :py:meth:`fit` has not been called.
+        ValueError
+            If ``push_to_hub=True`` but ``repo_id`` is not provided.
         """
         if not self._is_fitted:
             raise RuntimeError("Cannot save: Baker has not been fitted.")
+        if push_to_hub and not repo_id:
+            raise ValueError("repo_id is required when push_to_hub=True.")
+
         out_dir = Path(path)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -715,34 +741,65 @@ class Baker:
             path=str(out_dir / "directions.pkl"),
         )
 
+        # HuggingFace-compatible adapter config.  The ``adapter_type`` field
+        # mirrors the PEFT convention so the file is self-describing on the Hub.
         config: Dict[str, Any] = {
-            "model_id": self._model_id,
-            "device": self._device_str,
+            "adapter_type": "activation_baking",
+            "adapter_version": "1.0",
+            "base_model_id": self._model_id,
             "fitted_layers": self._fitted_layers,
             "k_values": self._k_values,
+            "n_components": next(
+                iter(self._directions.values())
+            ).components.shape[0] if self._directions else 0,
             "model_info": {
+                "architecture": self._model_info.architecture,
                 "num_layers": self._model_info.num_layers,
                 "hidden_size": self._model_info.hidden_size,
-                "architecture": self._model_info.architecture,
             },
         }
-        with (out_dir / "config.json").open("w", encoding="utf-8") as fh:
+        config_path = out_dir / "config.json"
+        with config_path.open("w", encoding="utf-8") as fh:
             json.dump(config, fh, indent=2)
 
         logger.info("Baker artefacts saved to '%s'.", out_dir)
+
+        if push_to_hub:
+            try:
+                from huggingface_hub import HfApi  # type: ignore[import]
+            except ImportError as exc:
+                raise ImportError(
+                    "huggingface_hub is required for push_to_hub. "
+                    "Install with: pip install huggingface_hub"
+                ) from exc
+
+            api = HfApi()
+            api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
+            api.upload_folder(
+                folder_path=str(out_dir),
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            logger.info("Adapter pushed to HuggingFace Hub: https://huggingface.co/%s", repo_id)
 
     @classmethod
     def load(cls, path: str, device: str = "auto") -> "Baker":
         """
         Load a previously saved :class:`Baker` instance.
 
-        The model is re-downloaded from HuggingFace Hub; only the steering
-        artefacts (directions + K values) are restored from disk.
+        ``path`` may be either a local directory written by :py:meth:`save` **or**
+        a HuggingFace Hub repository ID (e.g. ``"Kameshr/sycophancy-llama"``).
+        When a Hub ID is provided the artefacts are downloaded automatically via
+        ``huggingface_hub``; the base model is always streamed from the Hub.
+
+        This mirrors the PEFT ``PeftModel.from_pretrained`` pattern: the adapter
+        config is self-describing (it embeds ``base_model_id``), so no additional
+        arguments are needed to reconstruct the full model + adapter stack.
 
         Parameters
         ----------
         path:
-            Directory written by :py:meth:`save`.
+            Local directory path **or** HuggingFace Hub repo ID.
         device:
             Target device for the reloaded model.
 
@@ -754,9 +811,32 @@ class Baker:
         Raises
         ------
         FileNotFoundError
-            If the required artefact files are missing.
+            If the required artefact files are missing locally.
+
+        Examples
+        --------
+        Load from local disk::
+
+            baker = Baker.load("./my_adapter")
+
+        Load from HuggingFace Hub::
+
+            baker = Baker.load("Kameshr/sycophancy-suppression-llama")
         """
         in_dir = Path(path)
+
+        # Attempt Hub download when the path is not a local directory
+        if not in_dir.is_dir():
+            try:
+                from huggingface_hub import snapshot_download  # type: ignore[import]
+                logger.info("Path '%s' is not a local directory — attempting Hub download.", path)
+                local_dir = snapshot_download(repo_id=path, repo_type="model")
+                in_dir = Path(local_dir)
+            except Exception as exc:
+                raise FileNotFoundError(
+                    f"'{path}' is not a local directory and Hub download failed: {exc}"
+                ) from exc
+
         config_path = in_dir / "config.json"
         directions_path = in_dir / "directions.pkl"
 
@@ -767,8 +847,12 @@ class Baker:
         with config_path.open("r", encoding="utf-8") as fh:
             config: Dict[str, Any] = json.load(fh)
 
-        model_id: str = config["model_id"]
-        logger.info("Loading Baker from '%s' (model_id='%s').", in_dir, model_id)
+        # Support both old format (model_id key) and new HF-compatible format (base_model_id)
+        model_id: str = config.get("base_model_id", config.get("model_id", ""))
+        if not model_id:
+            raise ValueError("config.json missing 'base_model_id' field.")
+
+        logger.info("Loading Baker from '%s' (base_model_id='%s').", in_dir, model_id)
 
         baker = cls(model_id=model_id, device=device)
         baker._directions = PCADirector.load(str(directions_path))
