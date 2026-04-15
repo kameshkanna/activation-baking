@@ -468,7 +468,7 @@ class Baker:
             max_length=2048,
         ).to(self._device)
 
-        hooks: List[torch.utils.hooks.RemovableHook] = []
+        hooks: List[torch.utils.hooks.RemovableHandle] = []
         try:
             if steer:
                 hooks = self._register_steering_hooks(alpha=alpha)
@@ -510,7 +510,7 @@ class Baker:
 
     def _register_steering_hooks(
         self, alpha: float
-    ) -> List[torch.utils.hooks.RemovableHook]:
+    ) -> List[torch.utils.hooks.RemovableHandle]:
         """
         Register forward hooks on all fitted layers.
 
@@ -525,10 +525,10 @@ class Baker:
 
         Returns
         -------
-        List[torch.utils.hooks.RemovableHook]
+        List[torch.utils.hooks.RemovableHandle]
             Handles that must be removed after generation.
         """
-        hooks: List[torch.utils.hooks.RemovableHook] = []
+        hooks: List[torch.utils.hooks.RemovableHandle] = []
 
         for layer_name, bd in self._directions.items():
             module = self._get_module_by_name(layer_name)
