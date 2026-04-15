@@ -460,13 +460,20 @@ class Baker:
         if not prompts:
             raise ValueError("prompts must be a non-empty list.")
 
-        inputs = self._tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=2048,
-        ).to(self._device)
+        # Decoder-only models require left-padding during generation so that
+        # the last real token aligns at position -1 for every sequence.
+        orig_padding_side = self._tokenizer.padding_side
+        self._tokenizer.padding_side = "left"
+        try:
+            inputs = self._tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=2048,
+            ).to(self._device)
+        finally:
+            self._tokenizer.padding_side = orig_padding_side
 
         hooks: List[torch.utils.hooks.RemovableHandle] = []
         try:

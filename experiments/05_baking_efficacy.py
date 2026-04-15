@@ -230,40 +230,26 @@ def _reference_layer_idx(model_info: ModelInfo) -> int:
 def extract_last_token_activation(
     extractor: ActivationExtractor,
     prompts: List[str],
-    layer_idx: int,
+    layer_name: str,
     device: torch.device,
-    batch_size: int = 4,
 ) -> torch.Tensor:
-    """Extract the last-token hidden state at ``layer_idx`` for each prompt.
+    """Extract the last-token hidden state at ``layer_name`` for each prompt.
+
+    Delegates to :py:meth:`ActivationExtractor.extract` which processes prompts
+    in internal batches and returns a CPU tensor already aggregated to the last
+    non-padding token position.
 
     Args:
         extractor: Instantiated ActivationExtractor.
         prompts: List of text prompts to process.
-        layer_idx: 0-based transformer layer index.
-        device: Target device.
-        batch_size: Number of prompts per forward pass.
+        layer_name: Dot-separated module path (e.g. ``"model.layers.19"``).
+        device: Target device for the returned tensor.
 
     Returns:
-        Float32 tensor of shape ``[len(prompts), hidden_size]``.
+        Float32 tensor of shape ``[len(prompts), hidden_size]`` on ``device``.
     """
-    all_acts: List[torch.Tensor] = []
-
-    for start in range(0, len(prompts), batch_size):
-        batch = prompts[start : start + batch_size]
-        # ActivationExtractor is expected to return a dict[layer_idx -> Tensor]
-        # with shape [batch, seq_len, hidden] or [batch, hidden].
-        acts = extractor.extract(batch, layers=[layer_idx])  # type: ignore[attr-defined]
-        layer_act: torch.Tensor = acts[layer_idx]  # [B, seq, H] or [B, H]
-        if layer_act.dim() == 3:
-            layer_act = layer_act[:, -1, :]  # last token
-        all_acts.append(layer_act.to(device))
-
-        del acts, layer_act
-        gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-    return torch.cat(all_acts, dim=0)  # [N, H]
+    acts_dict = extractor.extract(prompts, layer_names=[layer_name], position="last")
+    return acts_dict[layer_name].to(device)  # [N, H]
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +332,7 @@ def evaluate_none(
     test_positive: List[str],
     test_negative: List[str],
     extractor: ActivationExtractor,
-    ref_layer: int,
+    ref_layer_name: str,
     device: torch.device,
 ) -> Dict:
     """Evaluate the no-steering baseline.
@@ -356,18 +342,18 @@ def evaluate_none(
         test_positive: Positive test prompts.
         test_negative: Negative test prompts.
         extractor: ActivationExtractor for hidden state extraction.
-        ref_layer: Reference layer index for metric computation.
+        ref_layer_name: Module path of the reference layer (e.g. "model.layers.19").
         device: Computation device.
 
     Returns:
         Dict with keys: method, alpha, per_pair_cos_pos, per_pair_cos_neg.
     """
     logger.info("Evaluating method: none")
-    baseline_outputs = baker.generate_baseline(test_positive)  # type: ignore[attr-defined]
+    baseline_outputs = baker.generate_baseline(test_positive)
 
-    steered_acts = extract_last_token_activation(extractor, baseline_outputs, ref_layer, device)
-    pos_acts = extract_last_token_activation(extractor, test_positive, ref_layer, device)
-    neg_acts = extract_last_token_activation(extractor, test_negative, ref_layer, device)
+    steered_acts = extract_last_token_activation(extractor, baseline_outputs, ref_layer_name, device)
+    pos_acts = extract_last_token_activation(extractor, test_positive, ref_layer_name, device)
+    neg_acts = extract_last_token_activation(extractor, test_negative, ref_layer_name, device)
 
     cos_pos = F.cosine_similarity(steered_acts, pos_acts, dim=-1).cpu().tolist()
     cos_neg = F.cosine_similarity(steered_acts, neg_acts, dim=-1).cpu().tolist()
@@ -388,7 +374,7 @@ def evaluate_steered_method(
     test_positive: List[str],
     test_negative: List[str],
     extractor: ActivationExtractor,
-    ref_layer: int,
+    ref_layer_name: str,
     device: torch.device,
 ) -> Dict:
     """Evaluate a steered method via Baker.generate.
@@ -400,18 +386,18 @@ def evaluate_steered_method(
         test_positive: Positive test prompts (steered from these).
         test_negative: Negative test prompts (used for metric only).
         extractor: ActivationExtractor for hidden state extraction.
-        ref_layer: Reference layer index.
+        ref_layer_name: Module path of the reference layer (e.g. "model.layers.19").
         device: Computation device.
 
     Returns:
         Dict with keys: method, alpha, per_pair_cos_pos, per_pair_cos_neg.
     """
     logger.info("Evaluating method: %s (alpha=%.2f)", method_name, alpha)
-    steered_outputs = baker.generate(test_positive, alpha=alpha)  # type: ignore[attr-defined]
+    steered_outputs = baker.generate(test_positive, alpha=alpha)
 
-    steered_acts = extract_last_token_activation(extractor, steered_outputs, ref_layer, device)
-    pos_acts = extract_last_token_activation(extractor, test_positive, ref_layer, device)
-    neg_acts = extract_last_token_activation(extractor, test_negative, ref_layer, device)
+    steered_acts = extract_last_token_activation(extractor, steered_outputs, ref_layer_name, device)
+    pos_acts = extract_last_token_activation(extractor, test_positive, ref_layer_name, device)
+    neg_acts = extract_last_token_activation(extractor, test_negative, ref_layer_name, device)
 
     cos_pos = F.cosine_similarity(steered_acts, pos_acts, dim=-1).cpu().tolist()
     cos_neg = F.cosine_similarity(steered_acts, neg_acts, dim=-1).cpu().tolist()
@@ -502,14 +488,20 @@ def run_efficacy_experiment(
     # ------------------------------------------------------------------
     extractor: ActivationExtractor = baker._extractor  # type: ignore[attr-defined]
     model_info: ModelInfo = baker._model_info  # type: ignore[attr-defined]
-    ref_layer = _reference_layer_idx(model_info)
-    logger.info("Using reference layer %d / %d for metric", ref_layer, model_info.num_layers)
+    ref_layer_idx = _reference_layer_idx(model_info)
+    ref_layer_name: str = model_info.layer_module_names[ref_layer_idx]
+    logger.info(
+        "Using reference layer %d / %d ('%s') for metric",
+        ref_layer_idx,
+        model_info.num_layers,
+        ref_layer_name,
+    )
 
     # ------------------------------------------------------------------
     # Method 1: none (baseline)
     # ------------------------------------------------------------------
     results_none = evaluate_none(
-        baker, test_pos, test_neg, extractor, ref_layer, device
+        baker, test_pos, test_neg, extractor, ref_layer_name, device
     )
 
     # ------------------------------------------------------------------
@@ -525,7 +517,7 @@ def run_efficacy_experiment(
         use_mean_diff=True,
     )
     results_raw = evaluate_steered_method(
-        baker, "raw_addition", alpha, test_pos, test_neg, extractor, ref_layer, device
+        baker, "raw_addition", alpha, test_pos, test_neg, extractor, ref_layer_name, device
     )
     gc.collect()
     if device.type == "cuda":
@@ -534,14 +526,14 @@ def run_efficacy_experiment(
     # ------------------------------------------------------------------
     # Method 3: pca_uncalibrated — PCA directions, K = 1.0
     # ------------------------------------------------------------------
-    baker.fit(  # type: ignore[attr-defined]
+    baker.fit(
         train_pos,
         train_neg,
         n_components=5,
         k_calibration=1.0,  # explicit K = 1.0 → no calibration
     )
     results_pca_uncal = evaluate_steered_method(
-        baker, "pca_uncalibrated", alpha, test_pos, test_neg, extractor, ref_layer, device
+        baker, "pca_uncalibrated", alpha, test_pos, test_neg, extractor, ref_layer_name, device
     )
 
     gc.collect()
@@ -551,14 +543,14 @@ def run_efficacy_experiment(
     # ------------------------------------------------------------------
     # Method 4: pca_k_calibrated — PCA + auto K
     # ------------------------------------------------------------------
-    baker.fit(  # type: ignore[attr-defined]
+    baker.fit(
         train_pos,
         train_neg,
         n_components=5,
         k_calibration="auto",
     )
     results_pca_kcal = evaluate_steered_method(
-        baker, "pca_k_calibrated", alpha, test_pos, test_neg, extractor, ref_layer, device
+        baker, "pca_k_calibrated", alpha, test_pos, test_neg, extractor, ref_layer_name, device
     )
 
     gc.collect()
