@@ -30,7 +30,7 @@ import gc
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -250,15 +250,47 @@ def run_weight_alignment_experiment(
     if not directions_path.exists():
         raise FileNotFoundError(
             f"PCA directions not found at {directions_path}. "
-            "Run experiment 04 (contrastive extraction) first."
+            "Run experiment 02 (contrastive extraction) first."
         )
 
     directions_payload = torch.load(directions_path, map_location="cpu")
-    # Expected format: dict[layer_idx -> Tensor[n_components, hidden]]
-    # OR a single Tensor [n_layers, n_components, hidden].
+
+    # Normalise to Dict[int, Tensor[n_components, hidden]].
+    # Experiment 02 saves Dict[str, BehavioralDirections]; other callers may
+    # pass Dict[int, Tensor] or a stacked Tensor[n_layers, n_components, hidden].
+    def _to_tensor(v: object) -> torch.Tensor:
+        if isinstance(v, torch.Tensor):
+            return v
+        if hasattr(v, "components") and isinstance(v.components, torch.Tensor):
+            return v.components  # BehavioralDirections.components: [n_comp, hidden]
+        raise ValueError(
+            f"Cannot extract direction tensor from value of type {type(v)}."
+        )
+
+    def _key_to_int(k: object) -> Optional[int]:
+        if isinstance(k, int):
+            return k
+        if isinstance(k, str):
+            try:
+                return int(k.split(".")[-1])
+            except ValueError:
+                return None
+        return None
+
     if isinstance(directions_payload, dict):
-        layer_indices_with_dirs = sorted(directions_payload.keys())
-        directions_by_layer: dict = directions_payload
+        directions_by_layer: Dict[int, torch.Tensor] = {}
+        for raw_key, raw_val in directions_payload.items():
+            idx = _key_to_int(raw_key)
+            if idx is None:
+                logger.warning(
+                    "Skipping key '%s' — cannot parse layer index.", raw_key
+                )
+                continue
+            try:
+                directions_by_layer[idx] = _to_tensor(raw_val)
+            except ValueError as exc:
+                logger.warning("Skipping layer %s: %s", raw_key, exc)
+        layer_indices_with_dirs: List[int] = sorted(directions_by_layer.keys())
     elif isinstance(directions_payload, torch.Tensor) and directions_payload.dim() == 3:
         directions_by_layer = {
             i: directions_payload[i] for i in range(directions_payload.shape[0])
@@ -267,7 +299,13 @@ def run_weight_alignment_experiment(
     else:
         raise ValueError(
             f"Unexpected format for directions.pt: {type(directions_payload)}. "
-            "Expected dict[int -> Tensor] or Tensor[n_layers, n_components, hidden]."
+            "Expected dict[layer->Tensor or BehavioralDirections] or "
+            "Tensor[n_layers, n_components, hidden]."
+        )
+
+    if not directions_by_layer:
+        raise ValueError(
+            f"No valid directions loaded from {directions_path}."
         )
 
     n_components: int = next(iter(directions_by_layer.values())).shape[0]

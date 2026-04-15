@@ -175,6 +175,49 @@ def _model_slug(model_id: str) -> str:
     return model_id.replace("/", "__")
 
 
+def _extract_direction_tensor(v: object) -> Optional[torch.Tensor]:
+    """Extract a float32 component tensor from a direction value.
+
+    Handles both raw ``torch.Tensor`` and ``BehavioralDirections`` dataclass
+    objects (produced by experiment 02), transparently returning the underlying
+    ``[n_components, hidden]`` tensor in both cases.
+
+    Args:
+        v: A direction value from a loaded ``directions.pt`` dict.
+
+    Returns:
+        Float32 tensor of shape ``[n_components, hidden]``, or ``None`` if the
+        type is unrecognised.
+    """
+    if isinstance(v, torch.Tensor):
+        return v.float()
+    if hasattr(v, "components") and isinstance(v.components, torch.Tensor):
+        return v.components.float()
+    return None
+
+
+def _key_to_layer_int(k: object) -> Optional[int]:
+    """Convert a directions.pt key to an integer layer index.
+
+    Handles both plain integer keys and string module-path keys such as
+    ``"model.layers.8"`` (produced by experiment 02).
+
+    Args:
+        k: Dict key from a loaded ``directions.pt`` file.
+
+    Returns:
+        Integer layer index, or ``None`` if conversion fails.
+    """
+    if isinstance(k, int):
+        return k
+    if isinstance(k, str):
+        try:
+            return int(k.split(".")[-1])
+        except ValueError:
+            return None
+    return None
+
+
 def load_pca_directions(
     results_dir: Path,
     model_id: str,
@@ -182,14 +225,19 @@ def load_pca_directions(
 ) -> Optional[Dict[int, torch.Tensor]]:
     """Load saved PCA direction tensors for a model/behavior pair.
 
+    Normalises the loaded file to ``Dict[int, Tensor[n_components, hidden]]``
+    regardless of the on-disk format (experiment 02 saves
+    ``Dict[str, BehavioralDirections]``; other formats are also supported).
+
     Args:
         results_dir: Root results directory.
         model_id: HuggingFace model identifier.
         behavior: Behavior name.
 
     Returns:
-        Dict mapping layer index to PCA direction tensor ``[n_components, hidden]``,
-        or ``None`` if the file is absent.
+        Dict mapping integer layer index to PCA direction tensor
+        ``[n_components, hidden]``, or ``None`` if the file is absent or
+        cannot be parsed.
     """
     slug = _model_slug(model_id)
     directions_path = results_dir / "pca_directions" / slug / behavior / "directions.pt"
@@ -199,12 +247,29 @@ def load_pca_directions(
         return None
 
     payload = torch.load(directions_path, map_location="cpu")
+
     if isinstance(payload, dict):
-        return payload
+        result: Dict[int, torch.Tensor] = {}
+        for raw_key, raw_val in payload.items():
+            idx = _key_to_layer_int(raw_key)
+            if idx is None:
+                logger.debug("Skipping unrecognised key '%s' in directions.pt.", raw_key)
+                continue
+            tensor = _extract_direction_tensor(raw_val)
+            if tensor is None:
+                logger.debug("Skipping key '%s': value type %s not recognised.", raw_key, type(raw_val))
+                continue
+            result[idx] = tensor
+        return result if result else None
+
     if isinstance(payload, torch.Tensor) and payload.dim() == 3:
-        return {i: payload[i] for i in range(payload.shape[0])}
+        return {i: payload[i].float() for i in range(payload.shape[0])}
+
     logger.error(
-        "Unrecognised directions.pt format for %s / %s", model_id, behavior
+        "Unrecognised directions.pt format for %s / %s: %s",
+        model_id,
+        behavior,
+        type(payload),
     )
     return None
 
