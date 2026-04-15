@@ -275,7 +275,7 @@ def _collect_spectral_norms(
         Dict mapping ``layer_name → {weight_type: spectral_norm}``.
     """
     # Use KCalibrator for spectral norms; fall back to direct computation if needed.
-    calibrator = KCalibrator(model=model, model_info=model_info)
+    calibrator = KCalibrator()
 
     results: Dict[str, Dict[str, float]] = {
         ln: {} for ln in model_info.layer_module_names
@@ -298,7 +298,6 @@ def _collect_spectral_norms(
                 leave=False,
             )
         ):
-            # Build the fully qualified module path for this layer + weight type
             sub_path = arch_patterns.get(pattern_key, "")
             if not sub_path:
                 logger.warning(
@@ -310,23 +309,16 @@ def _collect_spectral_norms(
                 continue
 
             full_path = f"{layer_name}.{sub_path}"
-            try:
-                # Prefer KCalibrator's optimised spectral norm if available
-                spectral_norm = calibrator.compute_spectral_norm(
-                    module_path=full_path
+            module = get_layer_module(model, full_path)
+            if not hasattr(module, "weight"):
+                logger.warning(
+                    "Module '%s' has no .weight attribute; spectral norm = NaN.",
+                    full_path,
                 )
-            except (AttributeError, NotImplementedError):
-                # Fallback: direct computation from weight matrix
-                module = get_layer_module(model, full_path)
-                if not hasattr(module, "weight"):
-                    logger.warning(
-                        "Module '%s' has no .weight attribute; spectral norm = NaN.",
-                        full_path,
-                    )
-                    results[layer_name][weight_type] = float("nan")
-                    continue
-                spectral_norm = _compute_spectral_norm_matrix(module.weight)
+                results[layer_name][weight_type] = float("nan")
+                continue
 
+            spectral_norm = calibrator.compute_spectral_norm(module.weight.data)
             results[layer_name][weight_type] = spectral_norm
 
         gc.collect()

@@ -279,7 +279,9 @@ def _profile_single_model(
     model, tokenizer = _load_model_and_tokenizer(hf_id, device, logger)
     model_info: ModelInfo = detect_model_info(model, hf_id)
 
-    extractor = ActivationExtractor(model=model, tokenizer=tokenizer, device=device)
+    extractor = ActivationExtractor(
+        model=model, tokenizer=tokenizer, model_info=model_info, device=device
+    )
 
     logger.info(
         "Profiling %d layers with %d prompts for architecture '%s' (hidden=%d).",
@@ -289,11 +291,23 @@ def _profile_single_model(
         hidden_size,
     )
 
-    # extract_layer_norms returns Dict[layer_name, {"mean": float, "std": float}]
-    layer_norm_stats: Dict[str, Dict[str, float]] = extractor.compute_layer_norms(
+    # extract() returns Dict[layer_name, Tensor[n_prompts, hidden]]
+    # compute mean and std of L2 norms per layer
+    raw_acts: Dict[str, torch.Tensor] = extractor.extract(
         prompts=prompts,
         layer_names=model_info.layer_module_names,
+        position="last",
     )
+
+    # Build Dict[layer_name, {"mean": float, "std": float}]
+    layer_norm_stats: Dict[str, Dict[str, float]] = {
+        ln: {
+            "mean": torch.linalg.vector_norm(acts, dim=-1).mean().item(),
+            "std":  torch.linalg.vector_norm(acts, dim=-1).std().item(),
+        }
+        for ln, acts in raw_acts.items()
+    }
+    del raw_acts
 
     # Build DataFrame
     records = []

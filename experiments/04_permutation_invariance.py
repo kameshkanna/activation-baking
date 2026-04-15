@@ -466,10 +466,12 @@ def _compute_directions_inline(
     train_pos = [positives[i] for i in train_idx]
     train_neg = [negatives[i] for i in train_idx]
 
-    extractor = ActivationExtractor(model=model, tokenizer=tokenizer, device=device)
+    extractor = ActivationExtractor(
+        model=model, tokenizer=tokenizer, model_info=model_info, device=device
+    )
     activation_diffs: Dict[str, torch.Tensor] = extractor.extract_contrastive_diffs(
-        positives=train_pos,
-        negatives=train_neg,
+        positive_prompts=train_pos,
+        negative_prompts=train_neg,
         layer_names=model_info.layer_module_names,
     )
 
@@ -575,11 +577,11 @@ def _run_single_permutation(
 
     # ---- Re-extract contrastive diffs on permuted model ----
     extractor = ActivationExtractor(
-        model=permuted_model, tokenizer=tokenizer, device=device
+        model=permuted_model, tokenizer=tokenizer, model_info=model_info, device=device
     )
     activation_diffs: Dict[str, torch.Tensor] = extractor.extract_contrastive_diffs(
-        positives=train_pos,
-        negatives=train_neg,
+        positive_prompts=train_pos,
+        negative_prompts=train_neg,
         layer_names=model_info.layer_module_names,
     )
 

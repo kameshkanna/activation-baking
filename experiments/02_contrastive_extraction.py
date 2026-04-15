@@ -362,12 +362,14 @@ def _run_extraction_for_behavior(
     )
 
     # ---- Extraction ----
-    extractor = ActivationExtractor(model=model, tokenizer=tokenizer, device=device)
+    extractor = ActivationExtractor(
+        model=model, tokenizer=tokenizer, model_info=model_info, device=device
+    )
 
     logger.info("Extracting contrastive diffs for %d train pairs…", len(train_pos))
     activation_diffs: Dict[str, torch.Tensor] = extractor.extract_contrastive_diffs(
-        positives=train_pos,
-        negatives=train_neg,
+        positive_prompts=train_pos,
+        negative_prompts=train_neg,
         layer_names=model_info.layer_module_names,
     )
 
