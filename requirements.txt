@@ -36,3 +36,4 @@ einops==0.8.0
 # Visualisation (analysis notebooks / paper figures)
 matplotlib==3.9.1
 seaborn==0.13.2
+Pillow>=9.1.0
