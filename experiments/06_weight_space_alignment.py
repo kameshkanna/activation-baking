@@ -210,6 +210,59 @@ def _get_weight_matrix(
 
 
 # ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+# Map from HuggingFace model ID to the short key used by experiment 02
+# as the directory name under results/pca_directions/.
+_HF_ID_TO_SHORT_KEY: Dict[str, str] = {
+    "meta-llama/Llama-3.1-8B-Instruct": "llama",
+    "Qwen/Qwen2.5-7B-Instruct": "qwen",
+    "google/gemma-2-9b-it": "gemma",
+    "mistralai/Mistral-7B-Instruct-v0.3": "mistral",
+}
+
+
+def _resolve_pca_dir(
+    results_dir: Path,
+    model_id: str,
+    behavior: str,
+) -> Path:
+    """Return the directory that contains the saved PCA directions.
+
+    Experiment 02 uses a short key (e.g. ``"llama"``) as the directory name.
+    Scripts 06/07 originally used the slugified HF ID
+    (e.g. ``"meta-llama__Llama-3.1-8B-Instruct"``).  This function tries
+    the short key first, then falls back to the slug, returning whichever
+    ``directions.pt`` exists.
+
+    Args:
+        results_dir: Root results directory.
+        model_id: HuggingFace model identifier.
+        behavior: Behavior name.
+
+    Returns:
+        Path to the directory containing ``directions.pt``.  The file is not
+        guaranteed to exist; callers should check separately.
+    """
+    candidates: List[Path] = []
+
+    short_key = _HF_ID_TO_SHORT_KEY.get(model_id)
+    if short_key:
+        candidates.append(results_dir / "pca_directions" / short_key / behavior)
+
+    slug = model_id.replace("/", "__")
+    candidates.append(results_dir / "pca_directions" / slug / behavior)
+
+    for candidate in candidates:
+        if (candidate / "directions.pt").exists():
+            return candidate
+
+    # Return the first candidate so callers get a descriptive FileNotFoundError
+    return candidates[0]
+
+
+# ---------------------------------------------------------------------------
 # Core experiment
 # ---------------------------------------------------------------------------
 
@@ -244,12 +297,12 @@ def run_weight_alignment_experiment(
     # ------------------------------------------------------------------
     # Load PCA directions
     # ------------------------------------------------------------------
-    directions_path = (
-        results_dir / "pca_directions" / model_slug / behavior / "directions.pt"
-    )
+    pca_dir = _resolve_pca_dir(results_dir, model_id, behavior)
+    directions_path = pca_dir / "directions.pt"
     if not directions_path.exists():
         raise FileNotFoundError(
-            f"PCA directions not found at {directions_path}. "
+            f"PCA directions not found (tried short key and slug). "
+            f"Last checked: {directions_path}. "
             "Run experiment 02 (contrastive extraction) first."
         )
 

@@ -175,6 +175,42 @@ def _model_slug(model_id: str) -> str:
     return model_id.replace("/", "__")
 
 
+# Map from HuggingFace model ID to the short key used by experiment 02
+# as the directory name under results/pca_directions/.
+_HF_ID_TO_SHORT_KEY: Dict[str, str] = {
+    "meta-llama/Llama-3.1-8B-Instruct": "llama",
+    "Qwen/Qwen2.5-7B-Instruct": "qwen",
+    "google/gemma-2-9b-it": "gemma",
+    "mistralai/Mistral-7B-Instruct-v0.3": "mistral",
+}
+
+
+def _resolve_pca_dir(results_dir: Path, model_id: str, behavior: str) -> Path:
+    """Return the directory containing saved PCA directions.
+
+    Tries the short model key (e.g. ``"llama"``) used by experiment 02 first,
+    then falls back to the slugified HF ID.  Returns the first directory that
+    contains a ``directions.pt`` file, or the primary candidate if none exists.
+
+    Args:
+        results_dir: Root results directory.
+        model_id: HuggingFace model identifier.
+        behavior: Behavior name.
+
+    Returns:
+        Path to the best candidate directory.
+    """
+    candidates: List[Path] = []
+    short_key = _HF_ID_TO_SHORT_KEY.get(model_id)
+    if short_key:
+        candidates.append(results_dir / "pca_directions" / short_key / behavior)
+    candidates.append(results_dir / "pca_directions" / _model_slug(model_id) / behavior)
+    for candidate in candidates:
+        if (candidate / "directions.pt").exists():
+            return candidate
+    return candidates[0]
+
+
 def _extract_direction_tensor(v: object) -> Optional[torch.Tensor]:
     """Extract a float32 component tensor from a direction value.
 
@@ -239,11 +275,11 @@ def load_pca_directions(
         ``[n_components, hidden]``, or ``None`` if the file is absent or
         cannot be parsed.
     """
-    slug = _model_slug(model_id)
-    directions_path = results_dir / "pca_directions" / slug / behavior / "directions.pt"
+    pca_dir = _resolve_pca_dir(results_dir, model_id, behavior)
+    directions_path = pca_dir / "directions.pt"
 
     if not directions_path.exists():
-        logger.warning("Directions not found: %s", directions_path)
+        logger.warning("Directions not found (tried short key and slug): %s", directions_path)
         return None
 
     payload = torch.load(directions_path, map_location="cpu")
@@ -294,8 +330,8 @@ def load_raw_diffs(
         Dict mapping layer index to diff matrix ``[n_samples, hidden]``,
         or ``None`` if absent.
     """
-    slug = _model_slug(model_id)
-    diffs_path = results_dir / "pca_directions" / slug / behavior / "raw_diffs.pt"
+    pca_dir = _resolve_pca_dir(results_dir, model_id, behavior)
+    diffs_path = pca_dir / "raw_diffs.pt"
 
     if not diffs_path.exists():
         return None
