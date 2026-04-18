@@ -286,6 +286,14 @@ def run_demo(
     )
     logger.info("Fused model saved → %s", fused_local_dir)
 
+    # Free the Baker's model from GPU before loading the fused copy — both
+    # can't fit on a single device simultaneously.
+    del fused_model, baker
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    logger.info("Baker unloaded; GPU memory freed for fused model reload.")
+
     # ------------------------------------------------------------------
     # Step 5: Reload fused model with plain AutoModelForCausalLM
     #         (no activation_baking import needed)
@@ -355,9 +363,9 @@ def run_demo(
         logger.info("STEERED : %s", row["steered_hook_output"][:200])
         logger.info("FUSED   : %s", row["fused_model_output"][:200])
 
-    # Clean up the in-process fused model to free GPU memory
-    del fused_model, fused_auto_model
-    torch.cuda.empty_cache() if device != "cpu" else None
+    del fused_auto_model
+    if device != "cpu":
+        torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------
