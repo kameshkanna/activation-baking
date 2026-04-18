@@ -837,6 +837,27 @@ class Baker:
         model_copy: PreTrainedModel = copy.deepcopy(self._model)
         model_copy.eval()
 
+        # Tell HF that this checkpoint has MLP biases so they survive save/load.
+        # Without this, from_pretrained creates Linear layers without bias and
+        # silently discards the saved bias tensors.
+        if hasattr(model_copy.config, "mlp_bias"):
+            model_copy.config.mlp_bias = True
+
+        # Zero-initialise biases on every down_proj so all layers round-trip
+        # cleanly; only fitted layers will receive a non-zero steering delta.
+        with torch.no_grad():
+            for down_proj_name in self._model_info.mlp_down_proj_names:
+                down_proj: nn.Linear = get_layer_module(model_copy, down_proj_name)  # type: ignore[assignment]
+                if down_proj.bias is None:
+                    down_proj.bias = nn.Parameter(
+                        torch.zeros(
+                            down_proj.out_features,
+                            device=down_proj.weight.device,
+                            dtype=down_proj.weight.dtype,
+                        ),
+                        requires_grad=False,
+                    )
+
         layer_to_idx: Dict[str, int] = {
             name: idx
             for idx, name in enumerate(self._model_info.layer_module_names)
