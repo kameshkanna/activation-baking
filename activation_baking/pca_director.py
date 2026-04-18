@@ -423,8 +423,8 @@ class PCADirector:
         meta: Dict[str, Dict] = {}
 
         for layer_name, bd in directions.items():
-            tensor_dict[f"{layer_name}/components"] = bd.components.cpu().float()
-            tensor_dict[f"{layer_name}/mean_diff"] = bd.mean_diff.cpu().float()
+            tensor_dict[f"{layer_name}/components"] = bd.components.cpu().float().contiguous()
+            tensor_dict[f"{layer_name}/mean_diff"] = bd.mean_diff.cpu().float().contiguous()
             meta[layer_name] = {
                 "layer_name": bd.layer_name,
                 "explained_variance_ratio": bd.explained_variance_ratio.tolist(),
