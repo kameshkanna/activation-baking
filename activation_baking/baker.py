@@ -6,6 +6,7 @@ prompt pairs, registers calibrated steering hooks during generation, and
 provides save/load for the steering artefacts (not model weights).
 """
 
+import copy
 import gc
 import json
 import logging
@@ -17,7 +18,7 @@ import torch
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from activation_baking.model_utils import ModelInfo, detect_model_info
+from activation_baking.model_utils import ModelInfo, detect_model_info, get_layer_module
 from activation_baking.extractor import ActivationExtractor
 from activation_baking.calibrator import KCalibrator
 from activation_baking.pca_director import BehavioralDirections, PCADirector
@@ -697,12 +698,14 @@ class Baker:
 
         Persisted artefacts
         -------------------
-        * ``config.json``     — HF-compatible adapter config: ``adapter_type``,
+        * ``config.json``              — HF-compatible adapter config: ``adapter_type``,
           ``base_model_id``, ``fitted_layers``, ``k_values``, and architecture metadata.
           Follows the same structural convention as PEFT adapter configs so that
           adapters are self-describing and discoverable on the Hub.
-        * ``directions.pkl``  — fitted :class:`BehavioralDirections` per layer.
-          Contains the PCA component tensors and per-layer K values.
+        * ``directions.safetensors``   — PCA component tensors and mean-diff vectors,
+          keyed as ``"{layer_name}/components"`` and ``"{layer_name}/mean_diff"``.
+        * ``directions_meta.json``     — non-tensor per-layer metadata (explained
+          variance ratios, n_pairs_fit, k_values).
 
         Model weights are **not** saved — the adapter is a lightweight side-file
         (~1--5 MB) that references the base model by HuggingFace model ID.
@@ -738,7 +741,7 @@ class Baker:
 
         self._director.save(
             directions=self._directions,
-            path=str(out_dir / "directions.pkl"),
+            path=str(out_dir / "directions.safetensors"),
         )
 
         # HuggingFace-compatible adapter config.  The ``adapter_type`` field
@@ -781,6 +784,219 @@ class Baker:
                 repo_type="model",
             )
             logger.info("Adapter pushed to HuggingFace Hub: https://huggingface.co/%s", repo_id)
+
+    # ------------------------------------------------------------------
+    # Weight fusion
+    # ------------------------------------------------------------------
+
+    def fuse_to_model(self, alpha: float = 1.0) -> PreTrainedModel:
+        """
+        Bake steering vectors permanently into model weights.
+
+        For each fitted layer the calibrated steering vector is added to the
+        ``down_proj`` bias of that layer's MLP sub-block.  Because ``down_proj``
+        is the final linear projection in the MLP, adding a constant to its
+        output is mathematically equivalent to adding that constant to the
+        whole block's residual-stream output — which is exactly what the
+        forward hook does at inference time.
+
+        The fused model is a complete, standard HuggingFace
+        ``PreTrainedModel`` that generates with the behaviour *without* any
+        hook machinery.  It can be saved with ``save_pretrained`` and loaded
+        with ``AutoModelForCausalLM.from_pretrained`` like any other
+        checkpoint.
+
+        Parameters
+        ----------
+        alpha:
+            Global scale factor applied on top of the per-layer calibrated K.
+            Defaults to ``1.0`` (the same scale used by ``Baker.generate``).
+
+        Returns
+        -------
+        PreTrainedModel
+            A deep copy of the base model with fused biases.  The original
+            ``Baker`` instance is not modified.
+
+        Raises
+        ------
+        RuntimeError
+            If :py:meth:`fit` has not been called.
+        ValueError
+            If a fitted layer name cannot be mapped to an ``mlp_down_proj``
+            module (i.e. the layer name is not in ``model_info.layer_module_names``).
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Cannot fuse: Baker has not been fitted.")
+
+        logger.info(
+            "Fusing steering vectors into model weights (alpha=%.4f, %d layers).",
+            alpha,
+            len(self._directions),
+        )
+        model_copy: PreTrainedModel = copy.deepcopy(self._model)
+        model_copy.eval()
+
+        layer_to_idx: Dict[str, int] = {
+            name: idx
+            for idx, name in enumerate(self._model_info.layer_module_names)
+        }
+
+        fused_count = 0
+        with torch.no_grad():
+            for layer_name, bd in self._directions.items():
+                if layer_name not in layer_to_idx:
+                    logger.warning(
+                        "fuse_to_model: layer '%s' not found in model_info; skipping.",
+                        layer_name,
+                    )
+                    continue
+                if bd.k_value is None:
+                    logger.warning(
+                        "fuse_to_model: k_value is None for layer '%s'; skipping.",
+                        layer_name,
+                    )
+                    continue
+
+                layer_idx = layer_to_idx[layer_name]
+                down_proj_name = self._model_info.mlp_down_proj_names[layer_idx]
+
+                # Compute the steering vector in float32 on CPU.
+                # Formula: alpha * k * components^T @ (components @ mean_diff)
+                components = bd.components.float().cpu()   # [k, hidden]
+                mean_diff = bd.mean_diff.float().cpu()     # [hidden]
+                projection_weights = torch.mv(components, mean_diff)       # [k]
+                steering_vector = torch.mv(components.T, projection_weights)  # [hidden]
+                bias_delta = (alpha * bd.k_value * steering_vector)        # [hidden]
+
+                # Retrieve the down_proj Linear module from the copy.
+                down_proj: nn.Linear = get_layer_module(model_copy, down_proj_name)  # type: ignore[assignment]
+                target_dtype = down_proj.weight.dtype
+                target_device = down_proj.weight.device
+                bias_delta = bias_delta.to(device=target_device, dtype=target_dtype)
+
+                if down_proj.bias is None:
+                    # Create a new bias parameter initialised to the steering vector.
+                    down_proj.bias = nn.Parameter(
+                        bias_delta.clone(), requires_grad=False
+                    )
+                else:
+                    down_proj.bias.data.add_(bias_delta)
+
+                fused_count += 1
+                logger.debug(
+                    "Fused steering into '%s' (bias_delta norm=%.4e).",
+                    down_proj_name,
+                    bias_delta.norm().item(),
+                )
+
+        gc.collect()
+        logger.info("Weight fusion complete: %d layers fused.", fused_count)
+        return model_copy
+
+    def save_fused_model(
+        self,
+        path: str,
+        alpha: float = 1.0,
+        push_to_hub: bool = False,
+        repo_id: Optional[str] = None,
+        private: bool = False,
+    ) -> PreTrainedModel:
+        """
+        Fuse steering vectors and save the resulting model + tokenizer.
+
+        Calls :py:meth:`fuse_to_model`, then writes the fused model and its
+        tokenizer to ``path`` via ``save_pretrained``.  Optionally pushes both
+        to the HuggingFace Hub so the adapter can be loaded by anyone with a
+        plain ``AutoModelForCausalLM.from_pretrained`` call — no
+        ``activation_baking`` library required.
+
+        A ``fused_adapter_config.json`` is also written alongside the model
+        to record provenance (base model, alpha, K values, layer count).
+
+        Parameters
+        ----------
+        path:
+            Local directory to write the fused model and tokenizer into.
+        alpha:
+            Steering magnitude multiplier forwarded to :py:meth:`fuse_to_model`.
+        push_to_hub:
+            Upload the saved artefacts to HuggingFace Hub.
+        repo_id:
+            HuggingFace Hub repository ID (e.g. ``"Kameshr/sycophancy-llama-fused"``).
+            Required when ``push_to_hub=True``.
+        private:
+            If ``True``, create the Hub repo as private.
+
+        Returns
+        -------
+        PreTrainedModel
+            The fused model (already saved; returned for in-process use).
+
+        Raises
+        ------
+        RuntimeError
+            If :py:meth:`fit` has not been called.
+        ValueError
+            If ``push_to_hub=True`` but ``repo_id`` is not provided.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Cannot save fused model: Baker has not been fitted.")
+        if push_to_hub and not repo_id:
+            raise ValueError("repo_id is required when push_to_hub=True.")
+
+        fused_model = self.fuse_to_model(alpha=alpha)
+
+        out_dir = Path(path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Saving fused model to '%s'.", out_dir)
+        fused_model.save_pretrained(str(out_dir))
+        self._tokenizer.save_pretrained(str(out_dir))
+
+        # Provenance record — not required for loading, but useful for reproducibility.
+        provenance: Dict[str, Any] = {
+            "fused_from": "activation_baking",
+            "base_model_id": self._model_id,
+            "alpha": alpha,
+            "k_values": self._k_values,
+            "fitted_layers": self._fitted_layers,
+            "n_components": next(
+                iter(self._directions.values())
+            ).components.shape[0] if self._directions else 0,
+            "model_info": {
+                "architecture": self._model_info.architecture,
+                "num_layers": self._model_info.num_layers,
+                "hidden_size": self._model_info.hidden_size,
+            },
+        }
+        prov_path = out_dir / "fused_adapter_config.json"
+        with prov_path.open("w", encoding="utf-8") as fh:
+            json.dump(provenance, fh, indent=2)
+        logger.info("Provenance config saved → %s", prov_path)
+
+        if push_to_hub:
+            try:
+                from huggingface_hub import HfApi  # type: ignore[import]
+            except ImportError as exc:
+                raise ImportError(
+                    "huggingface_hub is required for push_to_hub. "
+                    "Install with: pip install huggingface_hub"
+                ) from exc
+
+            api = HfApi()
+            api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
+            api.upload_folder(
+                folder_path=str(out_dir),
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            logger.info(
+                "Fused model pushed to HuggingFace Hub: https://huggingface.co/%s",
+                repo_id,
+            )
+
+        return fused_model
 
     @classmethod
     def load(cls, path: str, device: str = "auto") -> "Baker":
@@ -838,7 +1054,10 @@ class Baker:
                 ) from exc
 
         config_path = in_dir / "config.json"
-        directions_path = in_dir / "directions.pkl"
+        # Prefer safetensors; fall back to legacy pickle for backward compatibility.
+        directions_path = in_dir / "directions.safetensors"
+        if not directions_path.exists():
+            directions_path = in_dir / "directions.pkl"
 
         for p in (config_path, directions_path):
             if not p.exists():

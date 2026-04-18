@@ -78,9 +78,11 @@ zero hyperparameter search required.
 
 \paragraph{Activation baking as a HuggingFace adapter ecosystem.}
 The practical packaging of our method is its most operationally novel aspect.
-Fitted adapters are saved as two files—\texttt{config.json} (metadata: base model ID,
-fitted layers, K values, architecture; $<$1\,KB) and \texttt{directions.pkl}
-(PCA tensors; $\sim$1--5\,MB for a 7B model)—following the PEFT \texttt{adapter\_config}
+Fitted adapters are saved as three files—\texttt{config.json} (metadata: base model ID,
+fitted layers, K values, architecture; $<$1\,KB), \texttt{directions.safetensors}
+(PCA component tensors and mean-diff vectors in HuggingFace-standard safetensors format;
+$\sim$1--5\,MB for a 7B model), and \texttt{directions\_meta.json} (per-layer metadata:
+explained variance ratios, calibrated K values)—following the PEFT \texttt{adapter\_config}
 convention.
 These can be pushed directly to HuggingFace Hub and loaded by anyone with two lines:
 \begin{verbatim}
@@ -97,10 +99,12 @@ direct composability via vector addition.
 \paragraph{Contributions.}
 \begin{enumerate}
   \item \textbf{HuggingFace-compatible activation adapter format.}
-    We define a self-describing adapter artefact (\texttt{config.json} +
-    \texttt{directions.pkl}) that can be published to HuggingFace Hub and loaded
-    against any compatible base model with one call—no training, no weight mutation,
-    $<$5\,MB per behaviour.
+    We define a self-describing adapter artefact
+    (\texttt{config.json} + \texttt{directions.safetensors} + \texttt{directions\_meta.json})
+    that can be published to HuggingFace Hub and loaded against any compatible base model
+    with one call—no training, no weight mutation, $<$5\,MB per behaviour.
+    The safetensors format is secure (no arbitrary code execution risk from pickle),
+    human-inspectable, and consistent with the HuggingFace PEFT ecosystem.
     We release 20 fitted adapters (4 models $\times$ 5 behaviours) at
     \texttt{huggingface.co/Kameshr}.
   \item \textbf{$K$-calibration via spectral geometry.}
@@ -400,17 +404,32 @@ similarity ($0.055$) indicates maximally geometry-coupled directions.
 \subsection{Cross-Architecture Generalization}
 \label{sec:exp_cka}
 
-We compute linear CKA~\cite{kornblith2019similarity} between contrastive diff matrices
-at five relative depth fractions (0\%, 25\%, 50\%, 75\%, 100\%) across all model pairs.
-CKA scores are $\geq 0.998$ for both \texttt{sycophancy\_suppression} and
-\texttt{uncertainty\_expression}.
+We measure cross-architecture similarity of behavioral directions using two metrics
+at five relative depth fractions (0\%, 25\%, 50\%, 75\%, 100\%):
 
-These near-unity values indicate that the behavioral representation geometry is
-essentially identical across architectures at matched relative depth—the same semantic
-directions emerge regardless of whether the model is Llama, Qwen, Gemma, or Mistral.
-This strongly supports using activation baking as a universal, architecture-agnostic
-adapter: the same fitting procedure produces comparably structured directions across
-all models without any model-specific tuning.
+\textbf{(i) Principal-angle subspace cosine similarity.}
+For each model pair and depth fraction, we orthonormalise the two sets of PCA
+direction vectors (via QR decomposition) and compute the mean cosine of the
+principal angles between the resulting subspaces.
+Mean subspace cosine similarity is $\geq 0.999$ across all six model pairs and both
+behaviors (\texttt{sycophancy\_suppression}, \texttt{uncertainty\_expression}),
+indicating that the 5-component PCA subspaces extracted from different architectures
+at matched depth are nearly identical.
+
+\textbf{(ii) Linear CKA.}
+We implement the unbiased HSIC estimator of~\citet{kornblith2019similarity} (their
+Eq.~3), which zeros out the kernel diagonal before computing the statistic.
+This is essential in our regime: with only $n=5$ PCA components and $d \geq 3584$
+hidden dimensions, the standard double-centering estimator is known to approach 1.0
+regardless of true similarity~\cite{kornblith2019similarity}, making it an unreliable
+proxy with so few samples.
+Full unbiased CKA estimates require $n \geq 60$ raw contrastive-diff samples per layer;
+experiments with raw diffs are ongoing.
+
+The subspace cosine evidence strongly suggests that behavioral directions for a given
+semantic axis converge to structurally similar subspaces across Llama, Qwen, Gemma,
+and Mistral, supporting the hypothesis that activation baking adapters transfer across
+architectures without model-specific refitting.
 
 % ======================================================================
 \section{Related Work}

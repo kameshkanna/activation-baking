@@ -410,6 +410,16 @@ def _run_extraction_for_behavior(
     torch.save(directions, str(pt_path))
     logger.info("Directions saved → %s", pt_path)
 
+    # raw_diffs.pt — contrastive diff matrices keyed by layer, shape [n_pairs, hidden_size].
+    # Required by experiment 07 for reliable CKA computation over many samples rather
+    # than over the small number of PCA components.
+    raw_diffs_path = artefact_dir / "raw_diffs.pt"
+    torch.save(
+        {layer: diffs.cpu() for layer, diffs in activation_diffs.items()},
+        str(raw_diffs_path),
+    )
+    logger.info("Raw contrastive diffs saved → %s", raw_diffs_path)
+
     # variance_explained.csv
     var_df = _build_variance_df(directions, model_info.layer_module_names)
     var_csv_path = artefact_dir / "variance_explained.csv"

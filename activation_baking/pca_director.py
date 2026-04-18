@@ -6,6 +6,7 @@ and provides calibrated activation steering via the fitted PCA components.
 """
 
 import gc
+import json
 import logging
 import pickle
 from dataclasses import dataclass, field
@@ -370,53 +371,98 @@ class PCADirector:
         path: str,
     ) -> None:
         """
-        Serialise fitted directions to disk as a pickle file.
+        Serialise fitted directions to disk in safetensors + JSON format.
+
+        Two files are written to the same parent directory:
+
+        * ``directions.safetensors`` — all tensor data (components, mean_diff)
+          keyed as ``"{layer_name}/components"`` and ``"{layer_name}/mean_diff"``.
+        * ``directions_meta.json`` — non-tensor metadata per layer
+          (explained_variance_ratio, n_pairs_fit, k_value).
+
+        This format is human-inspectable, free of arbitrary code execution risk
+        (unlike pickle), and compatible with the safetensors ecosystem used
+        throughout HuggingFace.
 
         Parameters
         ----------
         directions:
             Output of :py:meth:`fit` (with or without k_values attached).
         path:
-            Destination file path.  Parent directories are created automatically.
+            Destination path for the ``.safetensors`` file.  The companion
+            ``directions_meta.json`` is written to the same directory.
+            Parent directories are created automatically.
 
         Raises
         ------
         TypeError
             If `directions` is not a dict.
+        ImportError
+            If ``safetensors`` is not installed.
         """
         if not isinstance(directions, dict):
             raise TypeError(
                 f"directions must be a dict, got {type(directions)}"
             )
+
+        try:
+            from safetensors.torch import save_file  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "safetensors is required to save directions. "
+                "Install with: pip install safetensors"
+            ) from exc
+
         out_path = Path(path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Move all tensors to CPU before pickling for portability
-        portable: Dict[str, BehavioralDirections] = {}
+        # ------------------------------------------------------------------
+        # Build flat tensor dict: "{layer_name}/components", "{layer_name}/mean_diff"
+        # ------------------------------------------------------------------
+        tensor_dict: Dict[str, torch.Tensor] = {}
+        meta: Dict[str, Dict] = {}
+
         for layer_name, bd in directions.items():
-            portable[layer_name] = BehavioralDirections(
-                layer_name=bd.layer_name,
-                components=bd.components.cpu(),
-                explained_variance_ratio=bd.explained_variance_ratio.copy(),
-                mean_diff=bd.mean_diff.cpu(),
-                n_pairs_fit=bd.n_pairs_fit,
-                k_value=bd.k_value,
-            )
+            tensor_dict[f"{layer_name}/components"] = bd.components.cpu().float()
+            tensor_dict[f"{layer_name}/mean_diff"] = bd.mean_diff.cpu().float()
+            meta[layer_name] = {
+                "layer_name": bd.layer_name,
+                "explained_variance_ratio": bd.explained_variance_ratio.tolist(),
+                "n_pairs_fit": bd.n_pairs_fit,
+                "k_value": bd.k_value,
+            }
 
-        with out_path.open("wb") as fh:
-            pickle.dump(portable, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        save_file(tensor_dict, str(out_path))
 
-        self._logger.info("Directions saved to '%s' (%d layers).", out_path, len(portable))
+        meta_path = out_path.parent / "directions_meta.json"
+        with meta_path.open("w", encoding="utf-8") as fh:
+            json.dump(meta, fh, indent=2)
+
+        self._logger.info(
+            "Directions saved to '%s' + '%s' (%d layers).",
+            out_path,
+            meta_path,
+            len(directions),
+        )
 
     @classmethod
     def load(cls, path: str) -> Dict[str, "BehavioralDirections"]:
         """
         Deserialise fitted directions from disk.
 
+        Supports both the current safetensors format (preferred) and the legacy
+        pickle format for backward compatibility.
+
+        For safetensors: ``path`` points to ``directions.safetensors``; a
+        companion ``directions_meta.json`` in the same directory provides
+        non-tensor metadata.
+
+        For legacy pickle: ``path`` points directly to the ``.pkl`` file.
+
         Parameters
         ----------
         path:
-            Path to the pickle file written by :py:meth:`save`.
+            Path to either ``directions.safetensors`` or a legacy ``directions.pkl``.
 
         Returns
         -------
@@ -431,10 +477,62 @@ class PCADirector:
         if not in_path.exists():
             raise FileNotFoundError(f"Directions file not found: '{in_path}'")
 
-        with in_path.open("rb") as fh:
-            directions: Dict[str, BehavioralDirections] = pickle.load(fh)
+        # ------------------------------------------------------------------
+        # Legacy pickle path
+        # ------------------------------------------------------------------
+        if in_path.suffix == ".pkl":
+            logger.warning(
+                "Loading directions from pickle ('%s'). "
+                "Re-save with PCADirector.save() to migrate to safetensors.",
+                in_path,
+            )
+            with in_path.open("rb") as fh:
+                directions: Dict[str, BehavioralDirections] = pickle.load(fh)
+            logger.info(
+                "Directions loaded from pickle '%s' (%d layers).",
+                in_path,
+                len(directions),
+            )
+            return directions
+
+        # ------------------------------------------------------------------
+        # Safetensors path
+        # ------------------------------------------------------------------
+        try:
+            from safetensors.torch import load_file  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "safetensors is required to load directions. "
+                "Install with: pip install safetensors"
+            ) from exc
+
+        tensor_dict = load_file(str(in_path))
+
+        meta_path = in_path.parent / "directions_meta.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"Companion metadata file not found: '{meta_path}'. "
+                "Expected alongside the .safetensors file."
+            )
+        with meta_path.open("r", encoding="utf-8") as fh:
+            meta: Dict[str, Dict] = json.load(fh)
+
+        directions_out: Dict[str, BehavioralDirections] = {}
+        for layer_name, layer_meta in meta.items():
+            components = tensor_dict[f"{layer_name}/components"]
+            mean_diff = tensor_dict[f"{layer_name}/mean_diff"]
+            directions_out[layer_name] = BehavioralDirections(
+                layer_name=layer_meta["layer_name"],
+                components=components,
+                explained_variance_ratio=np.array(
+                    layer_meta["explained_variance_ratio"], dtype=np.float32
+                ),
+                mean_diff=mean_diff,
+                n_pairs_fit=layer_meta["n_pairs_fit"],
+                k_value=layer_meta.get("k_value"),
+            )
 
         logger.info(
-            "Directions loaded from '%s' (%d layers).", in_path, len(directions)
+            "Directions loaded from '%s' (%d layers).", in_path, len(directions_out)
         )
-        return directions
+        return directions_out

@@ -61,44 +61,80 @@ DEPTH_FRACTIONS: Tuple[float, ...] = (0.0, 0.25, 0.50, 0.75, 1.0)
 # Centered Kernel Alignment
 # ---------------------------------------------------------------------------
 
-def _hsic(K: torch.Tensor, L: torch.Tensor) -> torch.Tensor:
-    """Compute the Hilbert-Schmidt Independence Criterion between two kernel matrices.
+def _hsic_unbiased(K: torch.Tensor, L: torch.Tensor) -> torch.Tensor:
+    """Compute the unbiased HSIC estimator (Kornblith et al., 2019).
 
-    Uses the unbiased estimator: HSIC(K, L) = <K_c, L_c>_F  where K_c is the
-    double-centred kernel matrix.
+    The biased double-centering estimator approaches 1.0 when the feature
+    dimension greatly exceeds the number of samples (d >> n), which is
+    the typical regime for PCA direction matrices (n ≤ 60, d ≥ 3584).
+    This unbiased estimator corrects for that artifact by zeroing out the
+    kernel diagonal before computing the statistic.
+
+    Definition (Eq. 3 in Kornblith et al. 2019)::
+
+        HSIC_0(K, L) = 1 / (n(n-3)) * [
+            sum_{i≠j} K̃_ij L̃_ij
+            + (sum_{i≠j} K̃_ij)(sum_{i≠j} L̃_ij) / ((n-1)(n-2))
+            − (2/(n-2)) * tr(K̃ L̃)
+        ]
+
+    where K̃ is K with diagonal set to zero.
 
     Args:
-        K: Symmetric kernel matrix of shape ``[n, n]``.
+        K: Symmetric kernel matrix of shape ``[n, n]``, ``n ≥ 4``.
         L: Symmetric kernel matrix of shape ``[n, n]``.
 
     Returns:
-        Scalar tensor.
+        Scalar tensor.  May be negative for small n; clamp before sqrt.
+
+    Raises:
+        ValueError: If ``n < 4``.
     """
     n = K.shape[0]
-    # Double-centre: K_c = (I - 11^T/n) K (I - 11^T/n)
-    H = torch.eye(n, dtype=K.dtype, device=K.device) - torch.ones(n, n, dtype=K.dtype, device=K.device) / n
-    K_c = H @ K @ H
-    L_c = H @ L @ H
-    return (K_c * L_c).sum()
+    if n < 4:
+        raise ValueError(
+            f"Unbiased HSIC requires n ≥ 4 samples; got {n}. "
+            "Increase the number of contrastive pairs or fall back to biased CKA."
+        )
+
+    # Zero out diagonals in-place copies (do not mutate the caller's tensors).
+    K_tilde = K.clone()
+    K_tilde.fill_diagonal_(0.0)
+    L_tilde = L.clone()
+    L_tilde.fill_diagonal_(0.0)
+
+    # Term 1: Frobenius inner product of zeroed-diagonal kernels.
+    # Equivalent to sum_{i≠j} K̃_ij L̃_ij because diagonals are zero.
+    term1 = (K_tilde * L_tilde).sum()
+
+    # Term 2: product of marginal sums, normalised.
+    sum_K = K_tilde.sum()
+    sum_L = L_tilde.sum()
+    term2 = sum_K * sum_L / ((n - 1) * (n - 2))
+
+    # Term 3: 2/(n-2) * tr(K̃ L̃).  tr(AB) = Σ_i (AB)_ii.
+    term3 = (2.0 / (n - 2)) * torch.trace(K_tilde @ L_tilde)
+
+    return (term1 + term2 - term3) / (n * (n - 3))
 
 
 def cka(X: torch.Tensor, Y: torch.Tensor) -> float:
-    """Compute linear Centered Kernel Alignment between two representation matrices.
+    """Compute linear CKA with the unbiased HSIC estimator.
 
-    CKA measures the similarity of two sets of representations up to linear
-    transformations.  A score of 1.0 indicates identical geometry; 0.0 indicates
-    no linear relationship.
+    Uses the Kornblith et al. (2019) unbiased estimator, which is robust to
+    the high-dimension / low-sample regime that arises when comparing PCA
+    direction matrices (n ≈ 5 components, d ≥ 3584 hidden dimensions).
 
     Linear CKA is defined as:
-        CKA(X, Y) = HSIC(XX^T, YY^T) / sqrt(HSIC(XX^T, XX^T) * HSIC(YY^T, YY^T))
+        CKA(X, Y) = HSIC_0(XX^T, YY^T) / sqrt(HSIC_0(XX^T, XX^T) * HSIC_0(YY^T, YY^T))
 
     Args:
-        X: Representation matrix of shape ``[n_samples, d1]``.  Rows are
-            individual samples; columns are feature dimensions.
+        X: Representation matrix of shape ``[n_samples, d1]``.
         Y: Representation matrix of shape ``[n_samples, d2]``.
 
     Returns:
-        CKA scalar in ``[0, 1]``.
+        CKA scalar.  Returns ``0.0`` when the denominator is negligible or when
+        ``n < 4`` (falls back gracefully).
 
     Raises:
         ValueError: If ``X`` and ``Y`` have different numbers of rows.
@@ -109,6 +145,13 @@ def cka(X: torch.Tensor, Y: torch.Tensor) -> float:
             f"got {X.shape[0]} vs {Y.shape[0]}."
         )
 
+    n = X.shape[0]
+    if n < 4:
+        logger.warning(
+            "cka: n=%d < 4; unbiased HSIC requires n ≥ 4.  Returning 0.0.", n
+        )
+        return 0.0
+
     # Centre the representations (mean subtraction per feature).
     X_c = X.float() - X.float().mean(dim=0, keepdim=True)
     Y_c = Y.float() - Y.float().mean(dim=0, keepdim=True)
@@ -116,9 +159,21 @@ def cka(X: torch.Tensor, Y: torch.Tensor) -> float:
     K = X_c @ X_c.T   # [n, n]
     L = Y_c @ Y_c.T   # [n, n]
 
-    hsic_kl = _hsic(K, L)
-    hsic_kk = _hsic(K, K)
-    hsic_ll = _hsic(L, L)
+    hsic_kl = _hsic_unbiased(K, L)
+    hsic_kk = _hsic_unbiased(K, K)
+    hsic_ll = _hsic_unbiased(L, L)
+
+    # Guard against negative denominator terms (can occur for very small n).
+    kk_val = hsic_kk.item()
+    ll_val = hsic_ll.item()
+    if kk_val <= 0.0 or ll_val <= 0.0:
+        logger.warning(
+            "cka: non-positive HSIC diagonal (HSIC_kk=%.4e, HSIC_ll=%.4e); "
+            "insufficient samples for reliable estimate. Returning 0.0.",
+            kk_val,
+            ll_val,
+        )
+        return 0.0
 
     denominator = torch.sqrt(hsic_kk * hsic_ll)
     if denominator.abs().item() < 1e-12:
