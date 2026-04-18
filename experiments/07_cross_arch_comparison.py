@@ -393,7 +393,15 @@ def load_raw_diffs(
 
     payload = torch.load(diffs_path, map_location="cpu")
     if isinstance(payload, dict):
-        return payload
+        result: Dict[int, torch.Tensor] = {}
+        for raw_key, raw_val in payload.items():
+            idx = _key_to_layer_int(raw_key)
+            if idx is None:
+                logger.debug("Skipping unrecognised key '%s' in raw_diffs.pt.", raw_key)
+                continue
+            if isinstance(raw_val, torch.Tensor):
+                result[idx] = raw_val.float()
+        return result if result else None
     logger.warning("Unexpected format for raw_diffs.pt: %s", type(payload))
     return None
 
